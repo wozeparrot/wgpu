@@ -79,11 +79,11 @@ package = "wgpu-types"
 version = "0.14.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-egl = { package = "khronos-egl", features = ["dynamic"], optional = true }
+egl = { package = "khronos-egl", version = "4.1.0", features = ["dynamic"], optional = true }
 libloading = { version = "0.7", optional = true }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
-egl = { package = "khronos-egl", features = ["static", "no-pkg-config"] }
+egl = { package = "khronos-egl", version = "4.1.0", features = ["static", "no-pkg-config"] }
 #Note: it's unused by emscripten, but we keep it to have single code base in egl.rs
 libloading = { version = "0.7", optional = true }
 
@@ -105,17 +105,19 @@ js-sys = "0.3.60"
 android_system_properties = "0.1.1"
 
 [dependencies.naga]
-workspace = true
+git = "https://github.com/gfx-rs/naga"
+rev = "e7fc8e6"
 features = ["clone"]
 
 # DEV dependencies
 [dev-dependencies.naga]
-workspace = true
+git = "https://github.com/gfx-rs/naga"
+rev = "e7fc8e6"
 features = ["wgsl-in"]
 
 [dev-dependencies]
-env_logger.workspace = true
-winit.workspace = true      # for "halmark" example
+env_logger = "0.9"
+winit = "0.27.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-glutin.workspace = true # for "gles" example
+glutin = "0.29.1"
