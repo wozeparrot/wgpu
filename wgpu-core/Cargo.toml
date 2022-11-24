@@ -50,6 +50,7 @@ thiserror = "1"
 [dependencies.naga]
 git = "https://github.com/gfx-rs/naga"
 rev = "e7fc8e6"
+version = "0.10"
 features = ["clone", "span", "validate"]
 
 [dependencies.wgt]

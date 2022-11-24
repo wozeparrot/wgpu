@@ -113,6 +113,7 @@ features = ["clone"]
 [dev-dependencies.naga]
 git = "https://github.com/gfx-rs/naga"
 rev = "e7fc8e6"
+version = "0.10"
 features = ["wgsl-in"]
 
 [dev-dependencies]
