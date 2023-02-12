@@ -1,4 +1,5 @@
 use crate::common::{initialize_test, TestParameters, TestingContext};
+use wasm_bindgen_test::*;
 use wgpu::util::align_to;
 
 static TEXTURE_FORMATS_UNCOMPRESSED: &[wgpu::TextureFormat] = &[
@@ -41,7 +42,7 @@ static TEXTURE_FORMATS_UNCOMPRESSED: &[wgpu::TextureFormat] = &[
 ];
 
 static TEXTURE_FORMATS_DEPTH: &[wgpu::TextureFormat] = &[
-    //wgpu::TextureFormat::Stencil8,
+    wgpu::TextureFormat::Stencil8,
     wgpu::TextureFormat::Depth16Unorm,
     wgpu::TextureFormat::Depth24Plus,
     wgpu::TextureFormat::Depth24PlusStencil8,
@@ -202,13 +203,15 @@ fn single_texture_clear_test(
     size: wgpu::Extent3d,
     dimension: wgpu::TextureDimension,
 ) {
-    println!(
+    log::info!(
         "clearing texture with {:?}, dimension {:?}, size {:?}",
-        format, dimension, size
+        format,
+        dimension,
+        size
     );
 
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(&format!("texture {:?}", format)),
+        label: Some(&format!("texture {format:?}")),
         size,
         mip_level_count: if dimension == wgpu::TextureDimension::D1 {
             1
@@ -222,6 +225,7 @@ fn single_texture_clear_test(
         // Forces internally the required usages to be able to clear it.
         // This is not visible on the API level.
         usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
     });
     let mut encoder = ctx
         .device
@@ -304,9 +308,12 @@ fn clear_texture_tests(
 }
 
 #[test]
+#[wasm_bindgen_test]
 fn clear_texture_2d_uncompressed() {
     initialize_test(
-        TestParameters::default().features(wgpu::Features::CLEAR_TEXTURE),
+        TestParameters::default()
+            .webgl2_failure()
+            .features(wgpu::Features::CLEAR_TEXTURE),
         |ctx| {
             clear_texture_tests(&ctx, TEXTURE_FORMATS_UNCOMPRESSED, true, true);
             clear_texture_tests(&ctx, TEXTURE_FORMATS_DEPTH, false, false);
@@ -315,6 +322,7 @@ fn clear_texture_2d_uncompressed() {
 }
 
 #[test]
+#[wasm_bindgen_test]
 fn clear_texture_d32_s8() {
     initialize_test(
         TestParameters::default()

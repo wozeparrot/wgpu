@@ -39,6 +39,8 @@ mod conv;
 mod descriptor;
 mod device;
 mod instance;
+mod shader_compilation;
+mod suballocation;
 mod view;
 
 use crate::auxil::{self, dxgi::result::HResult as _};
@@ -87,10 +89,12 @@ const ZERO_BUFFER_SIZE: wgt::BufferAddress = 256 << 10;
 
 pub struct Instance {
     factory: native::DxgiFactory,
+    factory_media: Option<native::FactoryMedia>,
     library: Arc<native::D3D12Lib>,
     supports_allow_tearing: bool,
     _lib_dxgi: native::DxgiLib,
     flags: crate::InstanceFlags,
+    dx12_shader_compiler: wgt::Dx12Compiler,
 }
 
 impl Instance {
@@ -100,7 +104,21 @@ impl Instance {
     ) -> Surface {
         Surface {
             factory: self.factory,
+            factory_media: self.factory_media,
             target: SurfaceTarget::Visual(unsafe { native::WeakPtr::from_raw(visual) }),
+            supports_allow_tearing: self.supports_allow_tearing,
+            swap_chain: None,
+        }
+    }
+
+    pub unsafe fn create_surface_from_surface_handle(
+        &self,
+        surface_handle: winnt::HANDLE,
+    ) -> Surface {
+        Surface {
+            factory: self.factory,
+            factory_media: self.factory_media,
+            target: SurfaceTarget::SurfaceHandle(surface_handle),
             supports_allow_tearing: self.supports_allow_tearing,
             swap_chain: None,
         }
@@ -125,10 +143,12 @@ struct SwapChain {
 enum SurfaceTarget {
     WndHandle(windef::HWND),
     Visual(native::WeakPtr<dcomp::IDCompositionVisual>),
+    SurfaceHandle(winnt::HANDLE),
 }
 
 pub struct Surface {
     factory: native::DxgiFactory,
+    factory_media: Option<native::FactoryMedia>,
     target: SurfaceTarget,
     supports_allow_tearing: bool,
     swap_chain: Option<SwapChain>,
@@ -152,6 +172,7 @@ struct PrivateCapabilities {
     #[allow(unused)]
     heterogeneous_resource_heaps: bool,
     memory_architecture: MemoryArchitecture,
+    #[allow(unused)] // TODO: Exists until windows-rs is standard, then it can probably be removed?
     heap_create_not_zeroed: bool,
 }
 
@@ -167,9 +188,11 @@ pub struct Adapter {
     device: native::Device,
     library: Arc<native::D3D12Lib>,
     private_caps: PrivateCapabilities,
+    presentation_timer: auxil::dxgi::time::PresentationTimer,
     //Note: this isn't used right now, but we'll need it later.
     #[allow(unused)]
     workarounds: Workarounds,
+    dx12_shader_compiler: wgt::Dx12Compiler,
 }
 
 unsafe impl Send for Adapter {}
@@ -237,6 +260,8 @@ pub struct Device {
     #[cfg(feature = "renderdoc")]
     render_doc: crate::auxil::renderdoc::RenderDoc,
     null_rtv_handle: descriptor::Handle,
+    mem_allocator: Option<Mutex<suballocation::GpuAllocatorWrapper>>,
+    dxc_container: Option<shader_compilation::DxcContainer>,
 }
 
 unsafe impl Send for Device {}
@@ -363,6 +388,7 @@ impl fmt::Debug for CommandEncoder {
 #[derive(Debug)]
 pub struct CommandBuffer {
     raw: native::GraphicsCommandList,
+    closed: bool,
 }
 
 unsafe impl Send for CommandBuffer {}
@@ -372,6 +398,7 @@ unsafe impl Sync for CommandBuffer {}
 pub struct Buffer {
     resource: native::Resource,
     size: wgt::BufferAddress,
+    allocation: Option<suballocation::AllocationWrapper>,
 }
 
 unsafe impl Send for Buffer {}
@@ -398,6 +425,7 @@ pub struct Texture {
     size: wgt::Extent3d,
     mip_level_count: u32,
     sample_count: u32,
+    allocation: Option<suballocation::AllocationWrapper>,
 }
 
 unsafe impl Send for Texture {}
@@ -406,10 +434,8 @@ unsafe impl Sync for Texture {}
 impl Texture {
     fn array_layer_count(&self) -> u32 {
         match self.dimension {
-            wgt::TextureDimension::D1 | wgt::TextureDimension::D2 => {
-                self.size.depth_or_array_layers
-            }
-            wgt::TextureDimension::D3 => 1,
+            wgt::TextureDimension::D1 | wgt::TextureDimension::D3 => 1,
+            wgt::TextureDimension::D2 => self.size.depth_or_array_layers,
         }
     }
 
@@ -531,6 +557,30 @@ pub struct ShaderModule {
     raw_name: Option<ffi::CString>,
 }
 
+pub(super) enum CompiledShader {
+    #[allow(unused)]
+    Dxc(Vec<u8>),
+    Fxc(native::Blob),
+}
+
+impl CompiledShader {
+    fn create_native_shader(&self) -> native::Shader {
+        match *self {
+            CompiledShader::Dxc(ref shader) => native::Shader::from_raw(shader),
+            CompiledShader::Fxc(shader) => native::Shader::from_blob(shader),
+        }
+    }
+
+    unsafe fn destroy(self) {
+        match self {
+            CompiledShader::Dxc(_) => {}
+            CompiledShader::Fxc(shader) => unsafe {
+                shader.destroy();
+            },
+        }
+    }
+}
+
 pub struct RenderPipeline {
     raw: native::PipelineState,
     layout: PipelineLayoutShared,
@@ -645,6 +695,19 @@ impl crate::Surface<Api> for Surface {
                             )
                             .into_result()
                     }
+                    SurfaceTarget::SurfaceHandle(handle) => {
+                        profiling::scope!(
+                            "IDXGIFactoryMedia::CreateSwapChainForCompositionSurfaceHandle"
+                        );
+                        self.factory_media
+                            .ok_or(crate::SurfaceError::Other("IDXGIFactoryMedia not found"))?
+                            .create_swapchain_for_composition_surface_handle(
+                                device.present_queue.as_mut_ptr() as *mut _,
+                                handle,
+                                &desc,
+                            )
+                            .into_result()
+                    }
                     SurfaceTarget::WndHandle(hwnd) => {
                         profiling::scope!("IDXGIFactory4::CreateSwapChainForHwnd");
                         self.factory
@@ -668,7 +731,7 @@ impl crate::Surface<Api> for Surface {
                 };
 
                 match self.target {
-                    SurfaceTarget::WndHandle(_) => {}
+                    SurfaceTarget::WndHandle(_) | SurfaceTarget::SurfaceHandle(_) => {}
                     SurfaceTarget::Visual(visual) => {
                         if let Err(err) =
                             unsafe { visual.SetContent(swap_chain1.as_unknown()) }.into_result()
@@ -706,7 +769,7 @@ impl crate::Surface<Api> for Surface {
                     )
                 };
             }
-            SurfaceTarget::Visual(_) => {}
+            SurfaceTarget::Visual(_) | SurfaceTarget::SurfaceHandle(_) => {}
         }
 
         unsafe { swap_chain.SetMaximumFrameLatency(config.swap_chain_size) };
@@ -764,6 +827,7 @@ impl crate::Surface<Api> for Surface {
             size: sc.size,
             mip_level_count: 1,
             sample_count: 1,
+            allocation: None,
         };
         Ok(Some(crate::AcquiredSurfaceTexture {
             texture,

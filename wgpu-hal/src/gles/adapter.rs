@@ -255,6 +255,7 @@ impl super::Adapter {
         } else {
             0
         };
+        let max_element_index = unsafe { gl.get_parameter_i32(glow::MAX_ELEMENT_INDEX) } as u32;
 
         // WORKAROUND: In order to work around an issue with GL on RPI4 and similar, we ignore a
         // zero vertex ssbo count if there are vertex sstos. (more info:
@@ -316,6 +317,14 @@ impl super::Adapter {
             wgt::DownlevelFlags::UNRESTRICTED_INDEX_BUFFER,
             !cfg!(target_arch = "wasm32"),
         );
+        downlevel_flags.set(
+            wgt::DownlevelFlags::UNRESTRICTED_EXTERNAL_TEXTURE_COPIES,
+            !cfg!(target_arch = "wasm32"),
+        );
+        downlevel_flags.set(
+            wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32,
+            max_element_index == u32::MAX,
+        );
 
         let mut features = wgt::Features::empty()
             | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
@@ -337,6 +346,10 @@ impl super::Adapter {
         features.set(
             wgt::Features::MULTIVIEW,
             extensions.contains("OVR_multiview2"),
+        );
+        features.set(
+            wgt::Features::SHADER_PRIMITIVE_INDEX,
+            ver >= (3, 2) || extensions.contains("OES_geometry_shader"),
         );
         let gles_bcn_exts = [
             "GL_EXT_texture_compression_s3tc_srgb",
@@ -420,6 +433,10 @@ impl super::Adapter {
         private_caps.set(
             super::PrivateCapabilities::COLOR_BUFFER_FLOAT,
             color_buffer_float,
+        );
+        private_caps.set(
+            super::PrivateCapabilities::TEXTURE_FLOAT_LINEAR,
+            extensions.contains("OES_texture_float_linear"),
         );
 
         let max_texture_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) } as u32;
@@ -565,6 +582,8 @@ impl super::Adapter {
                     features,
                     shading_language_version,
                     max_texture_size,
+                    next_shader_id: Default::default(),
+                    program_cache: Default::default(),
                 }),
             },
             info: Self::make_info(vendor, renderer),
@@ -670,7 +689,12 @@ impl crate::Adapter<super::Api> for super::Adapter {
                     .lock()
                     .get_parameter_i32(glow::MAX_SAMPLES)
             };
-            if max_samples >= 8 {
+            if max_samples >= 16 {
+                Tfc::MULTISAMPLE_X2
+                    | Tfc::MULTISAMPLE_X4
+                    | Tfc::MULTISAMPLE_X8
+                    | Tfc::MULTISAMPLE_X16
+            } else if max_samples >= 8 {
                 Tfc::MULTISAMPLE_X2 | Tfc::MULTISAMPLE_X4 | Tfc::MULTISAMPLE_X8
             } else if max_samples >= 4 {
                 Tfc::MULTISAMPLE_X2 | Tfc::MULTISAMPLE_X4
@@ -730,6 +754,9 @@ impl crate::Adapter<super::Api> for super::Adapter {
                 | Tfc::MULTISAMPLE_RESOLVE,
         );
 
+        let texture_float_linear =
+            private_caps_fn(super::PrivateCapabilities::TEXTURE_FLOAT_LINEAR, filterable);
+
         match format {
             Tf::R8Unorm => filterable_renderable,
             Tf::R8Snorm => filterable,
@@ -746,7 +773,7 @@ impl crate::Adapter<super::Api> for super::Adapter {
             Tf::Rg8Sint => renderable,
             Tf::R32Uint => renderable | storage,
             Tf::R32Sint => renderable | storage,
-            Tf::R32Float => unfilterable | storage | float_renderable,
+            Tf::R32Float => unfilterable | storage | float_renderable | texture_float_linear,
             Tf::Rg16Uint => renderable,
             Tf::Rg16Sint => renderable,
             Tf::Rg16Unorm => empty,
@@ -761,7 +788,7 @@ impl crate::Adapter<super::Api> for super::Adapter {
             Tf::Rg11b10Float => filterable | float_renderable,
             Tf::Rg32Uint => renderable,
             Tf::Rg32Sint => renderable,
-            Tf::Rg32Float => unfilterable | float_renderable,
+            Tf::Rg32Float => unfilterable | float_renderable | texture_float_linear,
             Tf::Rgba16Uint => renderable | storage,
             Tf::Rgba16Sint => renderable | storage,
             Tf::Rgba16Unorm => empty,
@@ -769,9 +796,9 @@ impl crate::Adapter<super::Api> for super::Adapter {
             Tf::Rgba16Float => filterable | storage | half_float_renderable,
             Tf::Rgba32Uint => renderable | storage,
             Tf::Rgba32Sint => renderable | storage,
-            Tf::Rgba32Float => unfilterable | storage | float_renderable,
-            //Tf::Stencil8 |
-            Tf::Depth16Unorm
+            Tf::Rgba32Float => unfilterable | storage | float_renderable | texture_float_linear,
+            Tf::Stencil8
+            | Tf::Depth16Unorm
             | Tf::Depth32Float
             | Tf::Depth32FloatStencil8
             | Tf::Depth24Plus
@@ -857,6 +884,10 @@ impl crate::Adapter<super::Api> for super::Adapter {
         } else {
             None
         }
+    }
+
+    unsafe fn get_presentation_timestamp(&self) -> wgt::PresentationTimestamp {
+        wgt::PresentationTimestamp::INVALID_TIMESTAMP
     }
 }
 

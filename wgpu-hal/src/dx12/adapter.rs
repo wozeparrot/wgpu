@@ -2,9 +2,9 @@ use crate::{
     auxil::{self, dxgi::result::HResult as _},
     dx12::SurfaceTarget,
 };
-use std::{mem, sync::Arc, thread};
+use std::{mem, ptr, sync::Arc, thread};
 use winapi::{
-    shared::{dxgi, dxgi1_2, windef, winerror},
+    shared::{dxgi, dxgi1_2, minwindef::DWORD, windef, winerror},
     um::{d3d12, d3d12sdklayers, winuser},
 };
 
@@ -52,6 +52,7 @@ impl super::Adapter {
         adapter: native::DxgiAdapter,
         library: &Arc<native::D3D12Lib>,
         instance_flags: crate::InstanceFlags,
+        dx12_shader_compiler: &wgt::Dx12Compiler,
     ) -> Option<crate::ExposedAdapter<super::Api>> {
         // Create the device so that we can get the capabilities.
         let device = {
@@ -209,7 +210,8 @@ impl super::Adapter {
             | wgt::Features::TEXTURE_COMPRESSION_BC
             | wgt::Features::CLEAR_TEXTURE
             | wgt::Features::TEXTURE_FORMAT_16BIT_NORM
-            | wgt::Features::PUSH_CONSTANTS;
+            | wgt::Features::PUSH_CONSTANTS
+            | wgt::Features::SHADER_PRIMITIVE_INDEX;
         //TODO: in order to expose this, we need to run a compute shader
         // that extract the necessary statistics out of the D3D12 result.
         // Alternatively, we could allocate a buffer for the query set,
@@ -229,6 +231,9 @@ impl super::Adapter {
             shader_model_support.HighestShaderModel >= d3d12::D3D_SHADER_MODEL_5_1,
         );
 
+        // TODO: Determine if IPresentationManager is supported
+        let presentation_timer = auxil::dxgi::time::PresentationTimer::new_dxgi();
+
         let base = wgt::Limits::default();
 
         Some(crate::ExposedAdapter {
@@ -237,7 +242,9 @@ impl super::Adapter {
                 device,
                 library: Arc::clone(library),
                 private_caps,
+                presentation_timer,
                 workarounds,
+                dx12_shader_compiler: dx12_shader_compiler.clone(),
             },
             info,
             features,
@@ -342,7 +349,13 @@ impl crate::Adapter<super::Api> for super::Adapter {
                 .into_device_result("Queue creation")?
         };
 
-        let device = super::Device::new(self.device, queue, self.private_caps, &self.library)?;
+        let device = super::Device::new(
+            self.device,
+            queue,
+            self.private_caps,
+            &self.library,
+            self.dx12_shader_compiler.clone(),
+        )?;
         Ok(crate::OpenDevice {
             device,
             queue: super::Queue {
@@ -382,16 +395,17 @@ impl crate::Adapter<super::Api> for super::Adapter {
         // the features that use SRV/UAVs using the no-depth format.
         let mut data_no_depth = d3d12::D3D12_FEATURE_DATA_FORMAT_SUPPORT {
             Format: no_depth_format,
-            Support1: unsafe { mem::zeroed() },
-            Support2: unsafe { mem::zeroed() },
+            Support1: d3d12::D3D12_FORMAT_SUPPORT1_NONE,
+            Support2: d3d12::D3D12_FORMAT_SUPPORT2_NONE,
         };
         if raw_format != no_depth_format {
             // Only-recheck if we're using a different format
             assert_eq!(winerror::S_OK, unsafe {
                 self.device.CheckFeatureSupport(
                     d3d12::D3D12_FEATURE_FORMAT_SUPPORT,
-                    &mut data_no_depth as *mut _ as *mut _,
-                    mem::size_of::<d3d12::D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as _,
+                    ptr::addr_of_mut!(data_no_depth).cast(),
+                    DWORD::try_from(mem::size_of::<d3d12::D3D12_FEATURE_DATA_FORMAT_SUPPORT>())
+                        .unwrap(),
                 )
             });
         } else {
@@ -478,6 +492,7 @@ impl crate::Adapter<super::Api> for super::Adapter {
         set_sample_count(2, Tfc::MULTISAMPLE_X2);
         set_sample_count(4, Tfc::MULTISAMPLE_X4);
         set_sample_count(8, Tfc::MULTISAMPLE_X8);
+        set_sample_count(16, Tfc::MULTISAMPLE_X16);
 
         caps
     }
@@ -501,7 +516,7 @@ impl crate::Adapter<super::Api> for super::Adapter {
                         None
                     }
                 }
-                SurfaceTarget::Visual(_) => None,
+                SurfaceTarget::Visual(_) | SurfaceTarget::SurfaceHandle(_) => None,
             }
         };
 
@@ -538,5 +553,9 @@ impl crate::Adapter<super::Api> for super::Adapter {
             present_modes,
             composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
         })
+    }
+
+    unsafe fn get_presentation_timestamp(&self) -> wgt::PresentationTimestamp {
+        wgt::PresentationTimestamp(self.presentation_timer.get_timestamp_ns())
     }
 }

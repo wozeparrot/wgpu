@@ -1,11 +1,13 @@
 //! Tests for buffer usages validation.
 
 use crate::common::{fail_if, initialize_test, TestParameters};
+use wasm_bindgen_test::*;
 use wgt::BufferAddress;
 
 const BUFFER_SIZE: BufferAddress = 1234;
 
 #[test]
+#[wasm_bindgen_test]
 fn buffer_usage() {
     fn try_create(enable_mappable_primary_buffers: bool, usages: &[(bool, &[wgpu::BufferUsages])]) {
         let mut parameters = TestParameters::default();
@@ -50,7 +52,8 @@ fn buffer_usage() {
         Bu::MAP_WRITE | Bu::COPY_SRC | Bu::STORAGE,
         Bu::all(),
     ];
-    let always_fail = &[Bu::empty()];
+    let invalid_bits = unsafe { Bu::from_bits_unchecked(0b1111111111111) };
+    let always_fail = &[Bu::empty(), invalid_bits];
 
     try_create(
         false,

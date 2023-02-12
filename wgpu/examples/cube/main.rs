@@ -99,7 +99,7 @@ impl<F: Future<Output = Option<wgpu::Error>>> Future for ErrorFuture<F> {
         let inner = unsafe { self.map_unchecked_mut(|me| &mut me.inner) };
         inner.poll(cx).map(|error| {
             if let Some(e) = error {
-                panic!("Rendering {}", e);
+                panic!("Rendering {e}");
             }
         })
     }
@@ -202,6 +202,7 @@ impl framework::Example for Example {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R8Uint,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         queue.write_texture(
@@ -406,7 +407,10 @@ fn main() {
     framework::run::<Example>("cube");
 }
 
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
 #[test]
+#[wasm_bindgen_test::wasm_bindgen_test]
 fn cube() {
     framework::test::<Example>(framework::FrameworkRefTest {
         image_path: "/examples/cube/screenshot.png",
@@ -420,6 +424,7 @@ fn cube() {
 }
 
 #[test]
+#[wasm_bindgen_test::wasm_bindgen_test]
 fn cube_lines() {
     framework::test::<Example>(framework::FrameworkRefTest {
         image_path: "/examples/cube/screenshot-lines.png",

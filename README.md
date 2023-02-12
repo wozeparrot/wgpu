@@ -56,7 +56,7 @@ files, producing 1.63-compatible files.
 
 ### Rust
 
-Rust examples can be found at `wgpu/examples`. You can run the examples with `cargo run --example name`. See the [list of examples](wgpu/examples). For detailed instructions, look at our [Get Started](https://github.com/gfx-rs/wgpu/wiki/Getting-Started) wiki.
+Rust examples can be found at `wgpu/examples`. You can run the examples with `cargo run --example name`. See the [list of examples](wgpu/examples). For detailed instructions, look at [Running the examples](https://github.com/gfx-rs/wgpu/wiki/Running-the-examples) on the wiki.
 
 If you are looking for a wgpu tutorial, look at the following:
 - https://sotrh.github.io/learn-wgpu/
@@ -130,6 +130,7 @@ All testing and example infrastructure shares the same set of environment variab
 - `WGPU_ADAPTER_NAME` with a substring of the name of the adapter you want to use (ex. `1080` will match `NVIDIA GeForce 1080ti`).
 - `WGPU_BACKEND` with a comma separated list of the backends you want to use (`vulkan`, `metal`, `dx12`, `dx11`, or `gl`).
 - `WGPU_POWER_PREF` with the power preference to choose when a specific adapter name isn't specified (`high` or `low`)
+- `WGPU_DX12_COMPILER` with the DX12 shader compiler you wish to use (`dxc` or `fxc`, note that `dxc` requires `dxil.dll` and `dxcompiler.dll` to be in the working directory otherwise it will fall back to `fxc`)
 
 When running the CTS, use the variables `DENO_WEBGPU_ADAPTER_NAME`, `DENO_WEBGPU_BACKEND`, `DENO_WEBGPU_POWER_PREFERENCE`.
 

@@ -81,7 +81,7 @@ This allows us to compose the operations to form the various kinds of tracker me
 that need to happen in the codebase. For each resource in the given merger, the following
 operation applies:
 
-```
+```text
 UsageScope <- Resource = insert(scope, usage) OR merge(scope, usage)
 UsageScope <- UsageScope = insert(scope, scope) OR merge(scope, scope)
 CommandBuffer <- UsageScope = insert(buffer.start, buffer.end, scope)
@@ -105,7 +105,7 @@ use crate::{
     pipeline, resource,
 };
 
-use std::{fmt, num::NonZeroU32, ops};
+use std::{fmt, ops};
 use thiserror::Error;
 
 pub(crate) use buffer::{BufferBindGroupState, BufferTracker, BufferUsageScope};
@@ -114,6 +114,7 @@ pub(crate) use stateless::{StatelessBindGroupSate, StatelessTracker};
 pub(crate) use texture::{
     TextureBindGroupState, TextureSelector, TextureTracker, TextureUsageScope,
 };
+use wgt::strict_assert_ne;
 
 /// A structure containing all the information about a particular resource
 /// transition. User code should be able to generate a pipeline barrier
@@ -161,9 +162,9 @@ impl PendingTransition<hal::TextureUses> {
             range: wgt::ImageSubresourceRange {
                 aspect: wgt::TextureAspect::All,
                 base_mip_level: self.selector.mips.start,
-                mip_level_count: unsafe { Some(NonZeroU32::new_unchecked(mip_count)) },
+                mip_level_count: Some(mip_count),
                 base_array_layer: self.selector.layers.start,
-                array_layer_count: unsafe { Some(NonZeroU32::new_unchecked(layer_count)) },
+                array_layer_count: Some(layer_count),
             },
             usage: self.usage,
         }

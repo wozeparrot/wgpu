@@ -1,4 +1,4 @@
-use std::{borrow::Cow, f32::consts, iter, mem, num::NonZeroU32, ops::Range, rc::Rc};
+use std::{borrow::Cow, f32::consts, iter, mem, ops::Range, rc::Rc};
 
 #[path = "../framework.rs"]
 mod framework;
@@ -197,6 +197,7 @@ impl Example {
             format: Self::DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             label: None,
+            view_formats: &[],
         });
 
         depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
@@ -385,6 +386,7 @@ impl framework::Example for Example {
             format: Self::SHADOW_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             label: None,
+            view_formats: &[],
         });
         let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -398,7 +400,7 @@ impl framework::Example for Example {
                     base_mip_level: 0,
                     mip_level_count: None,
                     base_array_layer: i as u32,
-                    array_layer_count: NonZeroU32::new(1),
+                    array_layer_count: Some(1),
                 }))
             })
             .collect::<Vec<_>>();
@@ -841,7 +843,10 @@ fn main() {
     framework::run::<Example>("shadow");
 }
 
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
 #[test]
+#[wasm_bindgen_test::wasm_bindgen_test]
 fn shadow() {
     framework::test::<Example>(framework::FrameworkRefTest {
         image_path: "/examples/shadow/screenshot.png",
