@@ -18,7 +18,7 @@ use crate::{
 use hal::{CommandEncoder as _, Device as _, Queue as _};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
-use std::{iter, mem, num::NonZeroU32, ptr};
+use std::{iter, mem, ptr};
 use thiserror::Error;
 
 /// Number of command buffers that we generate from the same pool
@@ -284,7 +284,7 @@ impl<A: hal::Api> StagingBuffer<A> {
 }
 
 #[derive(Clone, Debug, Error)]
-#[error("queue is invalid")]
+#[error("Queue is invalid")]
 pub struct InvalidQueue;
 
 #[derive(Clone, Debug, Error)]
@@ -301,17 +301,17 @@ pub enum QueueWriteError {
 pub enum QueueSubmitError {
     #[error(transparent)]
     Queue(#[from] DeviceError),
-    #[error("buffer {0:?} is destroyed")]
+    #[error("Buffer {0:?} is destroyed")]
     DestroyedBuffer(id::BufferId),
-    #[error("texture {0:?} is destroyed")]
+    #[error("Texture {0:?} is destroyed")]
     DestroyedTexture(id::TextureId),
     #[error(transparent)]
     Unmap(#[from] BufferAccessError),
     #[error("Buffer {0:?} is still mapped")]
     BufferStillMapped(id::BufferId),
-    #[error("surface output was dropped before the command buffer got submitted")]
+    #[error("Surface output was dropped before the command buffer got submitted")]
     SurfaceOutputDropped,
-    #[error("surface was unconfigured before the command buffer got submitted")]
+    #[error("Surface was unconfigured before the command buffer got submitted")]
     SurfaceUnconfigured,
     #[error("GPU got stuck :(")]
     StuckGpu,
@@ -602,10 +602,6 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .get_mut(destination.texture)
             .map_err(|_| TransferError::InvalidTexture(destination.texture))?;
 
-        let (selector, dst_base, texture_format) =
-            extract_texture_selector(destination, size, dst)?;
-        let format_desc = texture_format.describe();
-
         if !dst.desc.usage.contains(wgt::TextureUsages::COPY_DST) {
             return Err(
                 TransferError::MissingCopyDstUsageFlag(None, Some(destination.texture)).into(),
@@ -617,47 +613,58 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let (hal_copy_size, array_layer_count) =
             validate_texture_copy_range(destination, &dst.desc, CopySide::Destination, size)?;
 
-        // Note: `_source_bytes_per_array_layer` is ignored since we
-        // have a staging copy, and it can have a different value.
-        let (_, _source_bytes_per_array_layer) = validate_linear_texture_data(
-            data_layout,
-            texture_format,
-            data.len() as wgt::BufferAddress,
-            CopySide::Source,
-            format_desc.block_size as wgt::BufferAddress,
-            size,
-            false,
-        )?;
+        let (selector, dst_base) = extract_texture_selector(destination, size, dst)?;
 
-        if !conv::is_valid_copy_dst_texture_format(texture_format, destination.aspect) {
+        if !dst_base.aspect.is_one() {
+            return Err(TransferError::CopyAspectNotOne.into());
+        }
+
+        if !conv::is_valid_copy_dst_texture_format(dst.desc.format, destination.aspect) {
             return Err(TransferError::CopyToForbiddenTextureFormat {
-                format: texture_format,
+                format: dst.desc.format,
                 aspect: destination.aspect,
             }
             .into());
         }
-        let (block_width, block_height) = format_desc.block_dimensions;
-        let width_blocks = size.width / block_width as u32;
-        let height_blocks = size.height / block_height as u32;
 
-        let block_rows_per_image = match data_layout.rows_per_image {
-            Some(rows_per_image) => rows_per_image.get(),
-            None => {
-                // doesn't really matter because we need this only if we copy
-                // more than one layer, and then we validate for this being not
-                // None
-                size.height
-            }
-        };
+        // Note: `_source_bytes_per_array_layer` is ignored since we
+        // have a staging copy, and it can have a different value.
+        let (_, _source_bytes_per_array_layer) = validate_linear_texture_data(
+            data_layout,
+            dst.desc.format,
+            destination.aspect,
+            data.len() as wgt::BufferAddress,
+            CopySide::Source,
+            size,
+            false,
+        )?;
 
-        let bytes_per_row_alignment = get_lowest_common_denom(
-            device.alignments.buffer_copy_pitch.get() as u32,
-            format_desc.block_size as u32,
+        if dst.desc.format.is_depth_stencil_format() {
+            device
+                .require_downlevel_flags(wgt::DownlevelFlags::DEPTH_TEXTURE_AND_BUFFER_COPIES)
+                .map_err(TransferError::from)?;
+        }
+
+        let (block_width, block_height) = dst.desc.format.block_dimensions();
+        let width_blocks = size.width / block_width;
+        let height_blocks = size.height / block_height;
+
+        let block_rows_per_image = data_layout.rows_per_image.unwrap_or(
+            // doesn't really matter because we need this only if we copy
+            // more than one layer, and then we validate for this being not
+            // None
+            size.height,
         );
-        let stage_bytes_per_row = hal::auxil::align_to(
-            format_desc.block_size as u32 * width_blocks,
-            bytes_per_row_alignment,
-        );
+
+        let block_size = dst
+            .desc
+            .format
+            .block_size(Some(destination.aspect))
+            .unwrap();
+        let bytes_per_row_alignment =
+            get_lowest_common_denom(device.alignments.buffer_copy_pitch.get() as u32, block_size);
+        let stage_bytes_per_row =
+            hal::auxil::align_to(block_size * width_blocks, bytes_per_row_alignment);
 
         let block_rows_in_copy =
             (size.depth_or_array_layers - 1) * block_rows_per_image + height_blocks;
@@ -728,11 +735,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .as_raw()
             .ok_or(TransferError::InvalidTexture(destination.texture))?;
 
-        let bytes_per_row = if let Some(bytes_per_row) = data_layout.bytes_per_row {
-            bytes_per_row.get()
-        } else {
-            width_blocks * format_desc.block_size as u32
-        };
+        let bytes_per_row = data_layout
+            .bytes_per_row
+            .unwrap_or(width_blocks * block_size);
 
         // Platform validation requires that the staging buffer always be
         // freed, even if an error occurs. All paths from here must call
@@ -786,8 +791,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     offset: rel_array_layer as u64
                         * block_rows_per_image as u64
                         * stage_bytes_per_row as u64,
-                    bytes_per_row: NonZeroU32::new(stage_bytes_per_row),
-                    rows_per_image: NonZeroU32::new(block_rows_per_image),
+                    bytes_per_row: Some(stage_bytes_per_row),
+                    rows_per_image: Some(block_rows_per_image),
                 },
                 texture_base,
                 size: hal_copy_size,
@@ -814,7 +819,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         Ok(())
     }
 
-    #[cfg(all(target_arch = "wasm32", not(feature = "emscripten")))]
+    #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
     pub fn queue_copy_external_image_to_texture<A: HalApi>(
         &self,
         queue_id: id::QueueId,
@@ -857,9 +862,6 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let (mut texture_guard, _) = hub.textures.write(&mut token); // For clear we need write access to the texture. TODO: Can we acquire write lock later?
         let dst = texture_guard.get_mut(destination.texture).unwrap();
-
-        let (selector, dst_base, _) =
-            extract_texture_selector(&destination.to_untagged(), &size, dst)?;
 
         if !conv::is_valid_external_image_copy_dst_texture_format(dst.desc.format) {
             return Err(
@@ -929,6 +931,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             CopySide::Destination,
             &size,
         )?;
+
+        let (selector, dst_base) =
+            extract_texture_selector(&destination.to_untagged(), &size, dst)?;
 
         let mut trackers = device.trackers.lock();
         let encoder = device.pending_writes.activate();

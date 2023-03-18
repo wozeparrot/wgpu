@@ -191,7 +191,7 @@ impl Surface {
             "need to configure surface before presenting",
         ))?;
 
-        if swapchain.format.describe().srgb {
+        if swapchain.format.is_srgb() {
             // Important to set the viewport since we don't know in what state the user left it.
             unsafe {
                 gl.viewport(
@@ -277,7 +277,7 @@ impl crate::Surface<super::Api> for Surface {
             unsafe { gl.delete_framebuffer(swapchain.framebuffer) };
         }
 
-        if self.srgb_present_program.is_none() && config.format.describe().srgb {
+        if self.srgb_present_program.is_none() && config.format.is_srgb() {
             self.srgb_present_program = Some(unsafe { Self::create_srgb_present_program(gl) });
         }
 
@@ -285,7 +285,10 @@ impl crate::Surface<super::Api> for Surface {
             unsafe { gl.delete_texture(texture) };
         }
 
-        self.texture = Some(unsafe { gl.create_texture() }.unwrap());
+        self.texture = Some(unsafe { gl.create_texture() }.map_err(|error| {
+            log::error!("Internal swapchain texture creation failed: {error}");
+            crate::DeviceError::OutOfMemory
+        })?);
 
         let desc = device.shared.describe_texture_format(config.format);
         unsafe { gl.bind_texture(glow::TEXTURE_2D, self.texture) };
@@ -313,7 +316,10 @@ impl crate::Surface<super::Api> for Surface {
             )
         };
 
-        let framebuffer = unsafe { gl.create_framebuffer() }.unwrap();
+        let framebuffer = unsafe { gl.create_framebuffer() }.map_err(|error| {
+            log::error!("Internal swapchain framebuffer creation failed: {error}");
+            crate::DeviceError::OutOfMemory
+        })?;
         unsafe { gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer)) };
         unsafe {
             gl.framebuffer_texture_2d(

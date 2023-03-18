@@ -9,7 +9,7 @@ use crate::{
     },
     instance::{self, Adapter, Surface},
     pipeline, present,
-    resource::{self, BufferAccessResult, BufferMapState},
+    resource::{self, BufferAccessResult, BufferMapState, TextureViewNotRenderableReason},
     resource::{BufferAccessError, BufferMapOperation},
     track::{BindGroupStates, TextureSelector, Tracker},
     validation::{self, check_buffer_usage, check_texture_usage},
@@ -70,6 +70,12 @@ impl<T> AttachmentData<T> {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum RenderPassCompatibilityCheckType {
+    RenderPipeline,
+    RenderBundle,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq)]
 #[cfg_attr(feature = "serial-pass", derive(serde::Deserialize, serde::Serialize))]
 pub(crate) struct RenderPassContext {
@@ -79,16 +85,37 @@ pub(crate) struct RenderPassContext {
 }
 #[derive(Clone, Debug, Error)]
 pub enum RenderPassCompatibilityError {
-    #[error("Incompatible color attachment: the renderpass expected {0:?} but was given {1:?}")]
-    IncompatibleColorAttachment(Vec<Option<TextureFormat>>, Vec<Option<TextureFormat>>),
     #[error(
-        "Incompatible depth-stencil attachment: the renderpass expected {0:?} but was given {1:?}"
+        "Incompatible color attachments at indices {indices:?}: the RenderPass uses textures with formats {expected:?} but the {ty:?} uses attachments with formats {actual:?}",
     )]
-    IncompatibleDepthStencilAttachment(Option<TextureFormat>, Option<TextureFormat>),
-    #[error("Incompatible sample count: the renderpass expected {0:?} but was given {1:?}")]
-    IncompatibleSampleCount(u32, u32),
-    #[error("Incompatible multiview: the renderpass expected {0:?} but was given {1:?}")]
-    IncompatibleMultiview(Option<NonZeroU32>, Option<NonZeroU32>),
+    IncompatibleColorAttachment {
+        indices: Vec<usize>,
+        expected: Vec<Option<TextureFormat>>,
+        actual: Vec<Option<TextureFormat>>,
+        ty: RenderPassCompatibilityCheckType,
+    },
+    #[error(
+        "Incompatible depth-stencil attachment format: the RenderPass uses a texture with format {expected:?} but the {ty:?} uses an attachment with format {actual:?}",
+    )]
+    IncompatibleDepthStencilAttachment {
+        expected: Option<TextureFormat>,
+        actual: Option<TextureFormat>,
+        ty: RenderPassCompatibilityCheckType,
+    },
+    #[error(
+        "Incompatible sample count: the RenderPass uses textures with sample count {expected:?} but the {ty:?} uses attachments with format {actual:?}",
+    )]
+    IncompatibleSampleCount {
+        expected: u32,
+        actual: u32,
+        ty: RenderPassCompatibilityCheckType,
+    },
+    #[error("Incompatible multiview setting: the RenderPass uses setting {expected:?} but the {ty:?} uses setting {actual:?}")]
+    IncompatibleMultiview {
+        expected: Option<NonZeroU32>,
+        actual: Option<NonZeroU32>,
+        ty: RenderPassCompatibilityCheckType,
+    },
 }
 
 impl RenderPassContext {
@@ -96,32 +123,46 @@ impl RenderPassContext {
     pub(crate) fn check_compatible(
         &self,
         other: &Self,
+        ty: RenderPassCompatibilityCheckType,
     ) -> Result<(), RenderPassCompatibilityError> {
         if self.attachments.colors != other.attachments.colors {
-            return Err(RenderPassCompatibilityError::IncompatibleColorAttachment(
-                self.attachments.colors.iter().cloned().collect(),
-                other.attachments.colors.iter().cloned().collect(),
-            ));
+            let indices = self
+                .attachments
+                .colors
+                .iter()
+                .zip(&other.attachments.colors)
+                .enumerate()
+                .filter_map(|(idx, (left, right))| (left != right).then_some(idx))
+                .collect();
+            return Err(RenderPassCompatibilityError::IncompatibleColorAttachment {
+                indices,
+                expected: self.attachments.colors.iter().cloned().collect(),
+                actual: other.attachments.colors.iter().cloned().collect(),
+                ty,
+            });
         }
         if self.attachments.depth_stencil != other.attachments.depth_stencil {
             return Err(
-                RenderPassCompatibilityError::IncompatibleDepthStencilAttachment(
-                    self.attachments.depth_stencil,
-                    other.attachments.depth_stencil,
-                ),
+                RenderPassCompatibilityError::IncompatibleDepthStencilAttachment {
+                    expected: self.attachments.depth_stencil,
+                    actual: other.attachments.depth_stencil,
+                    ty,
+                },
             );
         }
         if self.sample_count != other.sample_count {
-            return Err(RenderPassCompatibilityError::IncompatibleSampleCount(
-                self.sample_count,
-                other.sample_count,
-            ));
+            return Err(RenderPassCompatibilityError::IncompatibleSampleCount {
+                expected: self.sample_count,
+                actual: other.sample_count,
+                ty,
+            });
         }
         if self.multiview != other.multiview {
-            return Err(RenderPassCompatibilityError::IncompatibleMultiview(
-                self.multiview,
-                other.multiview,
-            ));
+            return Err(RenderPassCompatibilityError::IncompatibleMultiview {
+                expected: self.multiview,
+                actual: other.multiview,
+                ty,
+            });
         }
         Ok(())
     }
@@ -303,9 +344,9 @@ pub struct Device<A: HalApi> {
 
 #[derive(Clone, Debug, Error)]
 pub enum CreateDeviceError {
-    #[error("not enough memory left")]
+    #[error("Not enough memory left")]
     OutOfMemory,
-    #[error("failed to create internal buffer for initializing textures")]
+    #[error("Failed to create internal buffer for initializing textures")]
     FailedToCreateZeroBuffer(#[from] DeviceError),
 }
 
@@ -728,11 +769,9 @@ impl<A: HalApi> Device<A> {
             &self.limits,
         )?;
 
-        let format_desc = desc.format.describe();
-
         if desc.dimension != wgt::TextureDimension::D2 {
             // Depth textures can only be 2D
-            if format_desc.sample_type == wgt::TextureSampleType::Depth {
+            if desc.format.is_depth_stencil_format() {
                 return Err(CreateTextureError::InvalidDepthDimension(
                     desc.dimension,
                     desc.format,
@@ -747,7 +786,7 @@ impl<A: HalApi> Device<A> {
             }
 
             // Compressed textures can only be 2D
-            if format_desc.is_compressed() {
+            if desc.format.is_compressed() {
                 return Err(CreateTextureError::InvalidCompressedDimension(
                     desc.dimension,
                     desc.format,
@@ -755,9 +794,8 @@ impl<A: HalApi> Device<A> {
             }
         }
 
-        if format_desc.is_compressed() {
-            let block_width = format_desc.block_dimensions.0 as u32;
-            let block_height = format_desc.block_dimensions.1 as u32;
+        if desc.format.is_compressed() {
+            let (block_width, block_height) = desc.format.block_dimensions();
 
             if desc.size.width % block_width != 0 {
                 return Err(CreateTextureError::InvalidDimension(
@@ -840,11 +878,7 @@ impl<A: HalApi> Device<A> {
         let missing_allowed_usages = desc.usage - format_features.allowed_usages;
         if !missing_allowed_usages.is_empty() {
             // detect downlevel incompatibilities
-            let wgpu_allowed_usages = desc
-                .format
-                .describe()
-                .guaranteed_format_features
-                .allowed_usages;
+            let wgpu_allowed_usages = desc.format.guaranteed_format_features().allowed_usages;
             let wgpu_missing_usages = desc.usage - wgpu_allowed_usages;
             return Err(CreateTextureError::InvalidFormatUsages(
                 missing_allowed_usages,
@@ -867,10 +901,10 @@ impl<A: HalApi> Device<A> {
             self.require_downlevel_flags(wgt::DownlevelFlags::VIEW_FORMATS)?;
         }
 
-        // Enforce having COPY_DST/DEPTH_STENCIL_WRIT/COLOR_TARGET otherwise we
+        // Enforce having COPY_DST/DEPTH_STENCIL_WRITE/COLOR_TARGET otherwise we
         // wouldn't be able to initialize the texture.
         let hal_usage = conv::map_texture_usage(desc.usage, desc.format.into())
-            | if format_desc.sample_type == wgt::TextureSampleType::Depth {
+            | if desc.format.is_depth_stencil_format() {
                 hal::TextureUses::DEPTH_STENCIL_WRITE
             } else if desc.usage.contains(wgt::TextureUsages::COPY_DST) {
                 hal::TextureUses::COPY_DST // (set already)
@@ -909,12 +943,11 @@ impl<A: HalApi> Device<A> {
         let clear_mode = if hal_usage
             .intersects(hal::TextureUses::DEPTH_STENCIL_WRITE | hal::TextureUses::COLOR_TARGET)
         {
-            let (is_color, usage) =
-                if desc.format.describe().sample_type == wgt::TextureSampleType::Depth {
-                    (false, hal::TextureUses::DEPTH_STENCIL_WRITE)
-                } else {
-                    (true, hal::TextureUses::COLOR_TARGET)
-                };
+            let (is_color, usage) = if desc.format.is_depth_stencil_format() {
+                (false, hal::TextureUses::DEPTH_STENCIL_WRITE)
+            } else {
+                (true, hal::TextureUses::COLOR_TARGET)
+            };
             let dimension = match desc.dimension {
                 wgt::TextureDimension::D1 => wgt::TextureViewDimension::D1,
                 wgt::TextureDimension::D2 => wgt::TextureViewDimension::D2,
@@ -977,7 +1010,13 @@ impl<A: HalApi> Device<A> {
         // resolve TextureViewDescriptor defaults
         // https://gpuweb.github.io/gpuweb/#abstract-opdef-resolving-gputextureviewdescriptor-defaults
 
-        let resolved_format = desc.format.unwrap_or(texture.desc.format);
+        let resolved_format = desc.format.unwrap_or_else(|| {
+            texture
+                .desc
+                .format
+                .aspect_specific_format(desc.range.aspect)
+                .unwrap_or(texture.desc.format)
+        });
 
         let resolved_dimension = desc
             .dimension
@@ -1018,8 +1057,7 @@ impl<A: HalApi> Device<A> {
 
         // validate TextureViewDescriptor
 
-        let aspects = hal::FormatAspects::from(texture.desc.format)
-            & hal::FormatAspects::from(desc.range.aspect);
+        let aspects = hal::FormatAspects::new(texture.desc.format, desc.range.aspect);
         if aspects.is_empty() {
             return Err(resource::CreateTextureViewError::InvalidAspect {
                 texture_format: texture.desc.format,
@@ -1027,9 +1065,17 @@ impl<A: HalApi> Device<A> {
             });
         }
 
-        if resolved_format != texture.desc.format
-            && !texture.desc.view_formats.contains(&resolved_format)
-        {
+        let format_is_good = if desc.range.aspect == wgt::TextureAspect::All {
+            resolved_format == texture.desc.format
+                || texture.desc.view_formats.contains(&resolved_format)
+        } else {
+            Some(resolved_format)
+                == texture
+                    .desc
+                    .format
+                    .aspect_specific_format(desc.range.aspect)
+        };
+        if !format_is_good {
             return Err(resource::CreateTextureViewError::FormatReinterpretation {
                 texture: texture.desc.format,
                 view: resolved_format,
@@ -1129,20 +1175,41 @@ impl<A: HalApi> Device<A> {
         };
 
         // https://gpuweb.github.io/gpuweb/#abstract-opdef-renderable-texture-view
-        let is_renderable = texture
-            .desc
-            .usage
-            .contains(wgt::TextureUsages::RENDER_ATTACHMENT)
-            && resolved_dimension == TextureViewDimension::D2
-            && resolved_mip_level_count == 1
-            && resolved_array_layer_count == 1
-            && aspects == hal::FormatAspects::from(texture.desc.format);
-
-        let render_extent = is_renderable.then(|| {
-            texture
+        let render_extent = 'b: loop {
+            if !texture
                 .desc
-                .compute_render_extent(desc.range.base_mip_level)
-        });
+                .usage
+                .contains(wgt::TextureUsages::RENDER_ATTACHMENT)
+            {
+                break 'b Err(TextureViewNotRenderableReason::Usage(texture.desc.usage));
+            }
+
+            if resolved_dimension != TextureViewDimension::D2 {
+                break 'b Err(TextureViewNotRenderableReason::Dimension(
+                    resolved_dimension,
+                ));
+            }
+
+            if resolved_mip_level_count != 1 {
+                break 'b Err(TextureViewNotRenderableReason::MipLevelCount(
+                    resolved_mip_level_count,
+                ));
+            }
+
+            if resolved_array_layer_count != 1 {
+                break 'b Err(TextureViewNotRenderableReason::ArrayLayerCount(
+                    resolved_array_layer_count,
+                ));
+            }
+
+            if aspects != hal::FormatAspects::from(texture.desc.format) {
+                break 'b Err(TextureViewNotRenderableReason::Aspects(aspects));
+            }
+
+            break 'b Ok(texture
+                .desc
+                .compute_render_extent(desc.range.base_mip_level));
+        };
 
         // filter the usages based on the other criteria
         let usage = {
@@ -1172,6 +1239,13 @@ impl<A: HalApi> Device<A> {
             usage
         );
 
+        // use the combined depth-stencil format for the view
+        let format = if resolved_format.is_depth_stencil_component(texture.desc.format) {
+            texture.desc.format
+        } else {
+            resolved_format
+        };
+
         let resolved_range = wgt::ImageSubresourceRange {
             aspect: desc.range.aspect,
             base_mip_level: desc.range.base_mip_level,
@@ -1182,7 +1256,7 @@ impl<A: HalApi> Device<A> {
 
         let hal_desc = hal::TextureViewDescriptor {
             label: desc.label.borrow_option(),
-            format: resolved_format,
+            format,
             dimension: resolved_dimension,
             usage,
             range: resolved_range,
@@ -1345,7 +1419,7 @@ impl<A: HalApi> Device<A> {
         );
         caps.set(
             Caps::FLOAT64,
-            self.features.contains(wgt::Features::SHADER_FLOAT64),
+            self.features.contains(wgt::Features::SHADER_F64),
         );
         caps.set(
             Caps::PRIMITIVE_INDEX,
@@ -1375,6 +1449,21 @@ impl<A: HalApi> Device<A> {
             Caps::STORAGE_TEXTURE_16BIT_NORM_FORMATS,
             self.features
                 .contains(wgt::Features::TEXTURE_FORMAT_16BIT_NORM),
+        );
+        caps.set(
+            Caps::MULTIVIEW,
+            self.features.contains(wgt::Features::MULTIVIEW),
+        );
+        caps.set(
+            Caps::EARLY_DEPTH_TEST,
+            self.features
+                .contains(wgt::Features::SHADER_EARLY_DEPTH_TEST),
+        );
+        caps.set(
+            Caps::MULTISAMPLED_SHADING,
+            self.downlevel
+                .flags
+                .contains(wgt::DownlevelFlags::MULTISAMPLED_SHADING),
         );
 
         let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), caps)
@@ -2191,7 +2280,6 @@ impl<A: HalApi> Device<A> {
         {
             return Err(Error::DepthStencilAspect);
         }
-        let format_info = view.desc.format.describe();
         match decl.ty {
             wgt::BindingType::Texture {
                 sample_type,
@@ -2206,7 +2294,12 @@ impl<A: HalApi> Device<A> {
                         view_samples: view.samples,
                     });
                 }
-                match (sample_type, format_info.sample_type) {
+                let compat_sample_type = view
+                    .desc
+                    .format
+                    .sample_type(Some(view.desc.range.aspect))
+                    .unwrap();
+                match (sample_type, compat_sample_type) {
                     (Tst::Uint, Tst::Uint) |
                     (Tst::Sint, Tst::Sint) |
                     (Tst::Depth, Tst::Depth) |
@@ -3101,8 +3194,7 @@ impl<A: HalApi> Device<A> {
         adapter: &Adapter<A>,
         format: TextureFormat,
     ) -> Result<wgt::TextureFormatFeatures, MissingFeatures> {
-        let format_desc = format.describe();
-        self.require_features(format_desc.required_features)?;
+        self.require_features(format.required_features())?;
 
         let using_device_features = self
             .features
@@ -3114,7 +3206,7 @@ impl<A: HalApi> Device<A> {
         if using_device_features || downlevel {
             Ok(adapter.get_texture_format_features(format))
         } else {
-            Ok(format_desc.guaranteed_format_features)
+            Ok(format.guaranteed_format_features())
         }
     }
 
@@ -3242,16 +3334,16 @@ impl<A: HalApi> crate::hub::Resource for Device<A> {
 }
 
 #[derive(Clone, Debug, Error)]
-#[error("device is invalid")]
+#[error("Device is invalid")]
 pub struct InvalidDevice;
 
 #[derive(Clone, Debug, Error)]
 pub enum DeviceError {
-    #[error("parent device is invalid")]
+    #[error("Parent device is invalid")]
     Invalid,
-    #[error("parent device is lost")]
+    #[error("Parent device is lost")]
     Lost,
-    #[error("not enough memory left")]
+    #[error("Not enough memory left")]
     OutOfMemory,
 }
 
@@ -3330,7 +3422,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         self.fetch_adapter_and_surface::<A, _, _>(surface_id, adapter_id, |adapter, surface| {
             let mut hal_caps = surface.get_capabilities(adapter)?;
 
-            hal_caps.formats.sort_by_key(|f| !f.describe().srgb);
+            hal_caps.formats.sort_by_key(|f| !f.is_srgb());
 
             Ok(wgt::SurfaceCapabilities {
                 formats: hal_caps.formats,
@@ -5530,22 +5622,22 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let mut closures = UserClosures::default();
         let mut all_queue_empty = true;
 
-        #[cfg(feature = "vulkan")]
+        #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
         {
             all_queue_empty = self.poll_devices::<hal::api::Vulkan>(force_wait, &mut closures)?
                 && all_queue_empty;
         }
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
         {
             all_queue_empty =
                 self.poll_devices::<hal::api::Metal>(force_wait, &mut closures)? && all_queue_empty;
         }
-        #[cfg(feature = "dx12")]
+        #[cfg(all(feature = "dx12", windows))]
         {
             all_queue_empty =
                 self.poll_devices::<hal::api::Dx12>(force_wait, &mut closures)? && all_queue_empty;
         }
-        #[cfg(feature = "dx11")]
+        #[cfg(all(feature = "dx11", windows))]
         {
             all_queue_empty =
                 self.poll_devices::<hal::api::Dx11>(force_wait, &mut closures)? && all_queue_empty;
